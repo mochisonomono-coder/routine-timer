@@ -352,31 +352,61 @@ function TodayPage({weekday,weekend,logs,setLogs,comments,setComments}) {
     setLogs(updated); save(SK.logs,updated);
   }
 
-  // バックグラウンド復帰時の時刻補正
-  useEffect(()=>{
-    function onVisibilityChange() {
-      if (document.visibilityState!=="visible") return;
-      const state=load("rt_timer_state"); if (!state) return;
-      const {index,startedAt,base}=state;
-      const now=Date.now();
-      const realElapsed=base+Math.floor((now-startedAt)/1000);
-      const routine=routinesRef.current[index]; if (!routine) return;
-      baseElapsedRef.current=realElapsed; startedAtRef.current=now;
-      setElapsed(realElapsed); setActiveIndex(index); activeIndexRef.current=index;
-      if (realElapsed>=routine.duration) {
-        clearInterval(timerRef.current); setRunning(false);
-        startedAtRef.current=null; save("rt_timer_state",null);
-        const over=realElapsed-routine.duration;
-        setMissedMsg(`${routine.icon} ${routine.name} が ${over<60?`${over}秒`:`${Math.floor(over/60)}分`}前に終了しました`);
-        playFinishSound();
-      } else {
-        setRunning(true); tickStart(index,base);
-      }
+  // タイマー状態復元（起動時 + バックグラウンド復帰時 共通処理）
+  function restoreTimerState() {
+    const state = load("rt_timer_state");
+    if (!state) return;
+    const { index, startedAt, base, scheduleType: savedType } = state;
+    const now = Date.now();
+    const realElapsed = base + Math.floor((now - startedAt) / 1000);
+    const routine = routinesRef.current[index];
+    if (!routine) { save("rt_timer_state", null); return; }
+
+    baseElapsedRef.current = realElapsed;
+    startedAtRef.current = now;
+    setElapsed(realElapsed);
+    setActiveIndex(index);
+    activeIndexRef.current = index;
+    setShowFull(true); // 全画面を自動で開く
+
+    if (realElapsed >= routine.duration) {
+      // バックグラウンド中にタイマーが終了していた
+      clearInterval(timerRef.current);
+      setRunning(false);
+      startedAtRef.current = null;
+      save("rt_timer_state", null);
+      const over = realElapsed - routine.duration;
+      setMissedMsg(
+        `${routine.icon} ${routine.name} が ${over < 60 ? `${over}秒` : `${Math.floor(over / 60)}分`}前に終了しました`
+      );
+      playFinishSound();
+    } else {
+      // まだ実行中 → タイマー再接続
+      setRunning(true);
+      tickStart(index, base);
     }
-    document.addEventListener("visibilitychange",onVisibilityChange);
-    return ()=>document.removeEventListener("visibilitychange",onVisibilityChange);
-  },[]);
-  useEffect(()=>()=>clearInterval(timerRef.current),[]);
+  }
+
+  // 起動時に保存済みタイマー状態を復元
+  useEffect(() => {
+    const state = load("rt_timer_state");
+    if (state) {
+      // 少し遅らせてroutinesRefが確定してから復元
+      setTimeout(() => restoreTimerState(), 100);
+    }
+  }, []);
+
+  // バックグラウンド→フォアグラウンド復帰時にも復元
+  useEffect(() => {
+    function onVisibilityChange() {
+      if (document.visibilityState !== "visible") return;
+      restoreTimerState();
+    }
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", onVisibilityChange);
+  }, []);
+
+  useEffect(() => () => clearInterval(timerRef.current), []);
 
   const doneCount=Object.keys(todayLog).length;
   const total=routines.length;
