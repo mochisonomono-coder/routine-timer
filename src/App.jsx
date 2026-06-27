@@ -43,39 +43,56 @@ function dateLabel(d) { return new Date(d).toLocaleDateString("ja-JP",{month:"sh
 
 // ── Web Audio ───────────────────────────────────────────────
 let _audioCtx = null;
+
 function getAudioCtx() {
-  if (!_audioCtx) _audioCtx = new (window.AudioContext||window.webkitAudioContext)();
-  if (_audioCtx.state==="suspended") _audioCtx.resume().catch(()=>{});
+  if (!_audioCtx) {
+    try { _audioCtx = new (window.AudioContext||window.webkitAudioContext)(); } catch { return null; }
+  }
   return _audioCtx;
 }
+
+// ユーザー操作起点でAudioContextをunlock（開始・再開ボタンで呼ぶ）
 function unlockAudio() {
   try {
-    const ctx = getAudioCtx();
+    const ctx = getAudioCtx(); if (!ctx) return;
     const osc = ctx.createOscillator(), g = ctx.createGain();
     g.gain.value = 0; osc.connect(g); g.connect(ctx.destination);
-    osc.start(); osc.stop(ctx.currentTime+0.001);
+    osc.start(); osc.stop(ctx.currentTime + 0.001);
   } catch {}
 }
+
+// resume()完了を待ってから音を鳴らす（iOSのsuspended対策）
 function playFinishSound() {
   try {
-    const ctx = getAudioCtx();
-    [523.25,659.25,783.99,1046.5].forEach((freq,i) => {
-      const osc=ctx.createOscillator(), gain=ctx.createGain();
-      osc.connect(gain); gain.connect(ctx.destination);
-      osc.type="sine"; osc.frequency.value=freq;
-      const t=ctx.currentTime+i*0.2;
-      gain.gain.setValueAtTime(0,t);
-      gain.gain.linearRampToValueAtTime(0.4,t+0.03);
-      gain.gain.exponentialRampToValueAtTime(0.001,t+0.5);
-      osc.start(t); osc.stop(t+0.55);
-    });
-    const osc2=ctx.createOscillator(), g2=ctx.createGain();
-    osc2.connect(g2); g2.connect(ctx.destination);
-    osc2.type="sine"; osc2.frequency.value=1046.5;
-    const t2=ctx.currentTime+4*0.2+0.1;
-    g2.gain.setValueAtTime(0,t2); g2.gain.linearRampToValueAtTime(0.3,t2+0.05);
-    g2.gain.exponentialRampToValueAtTime(0.001,t2+1.2);
-    osc2.start(t2); osc2.stop(t2+1.3);
+    const ctx = getAudioCtx(); if (!ctx) return;
+    const doPlay = () => {
+      try {
+        [523.25, 659.25, 783.99, 1046.5].forEach((freq, i) => {
+          const osc = ctx.createOscillator(), gain = ctx.createGain();
+          osc.connect(gain); gain.connect(ctx.destination);
+          osc.type = "sine"; osc.frequency.value = freq;
+          const t = ctx.currentTime + i * 0.22;
+          gain.gain.setValueAtTime(0, t);
+          gain.gain.linearRampToValueAtTime(0.45, t + 0.03);
+          gain.gain.exponentialRampToValueAtTime(0.001, t + 0.55);
+          osc.start(t); osc.stop(t + 0.6);
+        });
+        // 余韻
+        const osc2 = ctx.createOscillator(), g2 = ctx.createGain();
+        osc2.connect(g2); g2.connect(ctx.destination);
+        osc2.type = "sine"; osc2.frequency.value = 1046.5;
+        const t2 = ctx.currentTime + 4 * 0.22 + 0.15;
+        g2.gain.setValueAtTime(0, t2);
+        g2.gain.linearRampToValueAtTime(0.35, t2 + 0.05);
+        g2.gain.exponentialRampToValueAtTime(0.001, t2 + 1.5);
+        osc2.start(t2); osc2.stop(t2 + 1.6);
+      } catch {}
+    };
+    if (ctx.state === "suspended") {
+      ctx.resume().then(doPlay).catch(doPlay);
+    } else {
+      doPlay();
+    }
   } catch {}
 }
 
@@ -265,7 +282,13 @@ function TodayPage({weekday,weekend,logs,setLogs,comments,setComments}) {
       const routine=routinesRef.current[index];
       if (e>=routine.duration) {
         clearInterval(timerRef.current); setRunning(false);
-        playFinishSound();
+        // AudioContext が suspended になっていても resume してから鳴らす
+        const ctx = getAudioCtx();
+        if (ctx && ctx.state === "suspended") {
+          ctx.resume().then(() => { playFinishSound(); }).catch(() => { playFinishSound(); });
+        } else {
+          playFinishSound();
+        }
         sendNotif(`✅ ${routine.icon} ${routine.name} 完了！`,
           routinesRef.current[index+1]?`次: ${routinesRef.current[index+1].name}`:"すべて完了しました");
         if (navigator.vibrate) navigator.vibrate([200,100,200]);
