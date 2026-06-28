@@ -1,10 +1,60 @@
 // build: 2026-06-27-v2
 import { useState, useEffect, useRef } from "react";
 
-// ── ストレージ ──────────────────────────────────────────────
+// ── ストレージ（localStorage + Firebase同期） ───────────────
+import { db } from "./firebase";
+import { ref, set, onValue, off } from "firebase/database";
+
 const SK = { weekday: "rt_routines_weekday", weekend: "rt_routines_weekend", logs: "rt_logs", comments: "rt_comments" };
+const FB_KEYS = ["rt_routines_weekday","rt_routines_weekend","rt_logs","rt_comments"];
+const USER_ID = "keita"; // 固定ユーザーID（個人利用）
+
+// localStorage（高速・オフライン対応）
 function load(key) { try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : null; } catch { return null; } }
-function save(key, val) { try { localStorage.setItem(key, JSON.stringify(val)); } catch {} }
+function save(key, val) {
+  try { localStorage.setItem(key, JSON.stringify(val)); } catch {}
+  // Firebaseにも同期（主要データのみ）
+  if (FB_KEYS.includes(key)) {
+    try {
+      const fbRef = ref(db, `users/${USER_ID}/${key}`);
+      set(fbRef, val).catch(()=>{});
+    } catch {}
+  }
+}
+
+// Firebase → localStorageへの初回同期
+export function syncFromFirebase(onDone) {
+  const results = {};
+  let count = 0;
+  FB_KEYS.forEach(key => {
+    const fbRef = ref(db, `users/${USER_ID}/${key}`);
+    onValue(fbRef, (snapshot) => {
+      const val = snapshot.val();
+      if (val !== null) {
+        localStorage.setItem(key, JSON.stringify(val));
+        results[key] = val;
+      }
+      count++;
+      if (count === FB_KEYS.length) onDone(results);
+    }, { onlyOnce: true });
+  });
+}
+
+// Firebaseのリアルタイム更新を購読（他端末からの変更を反映）
+export function subscribeFirebase(callbacks) {
+  const unsubs = FB_KEYS.map(key => {
+    const fbRef = ref(db, `users/${USER_ID}/${key}`);
+    const handler = onValue(fbRef, (snapshot) => {
+      const val = snapshot.val();
+      if (val !== null && callbacks[key]) {
+        localStorage.setItem(key, JSON.stringify(val));
+        callbacks[key](val);
+      }
+    });
+    return () => off(fbRef, 'value', handler);
+  });
+  return () => unsubs.forEach(u => u());
+}
 
 // ── 祝日判定 ────────────────────────────────────────────────
 const HOLIDAYS = ["01-01","01-02","01-03","02-11","02-23","03-20","04-29","05-03","05-04","05-05","07-20","08-11","09-23","10-14","11-03","11-23","12-23"];
@@ -919,8 +969,29 @@ export default function App() {
   const [logs,setLogs]=useState(()=>load(SK.logs)??{});
   const [comments,setComments]=useState(()=>load(SK.comments)??{});
   const [notifAsked,setNotifAsked]=useState(false);
+  const [syncStatus,setSyncStatus]=useState("syncing"); // syncing | synced | offline
 
   async function handleEnableNotif() { await requestNotifPermission(); setNotifAsked(true); }
+
+  // Firebase初回同期 + リアルタイム購読
+  useEffect(()=>{
+    // 初回：Firebaseからデータを取得してlocalStorageと画面を更新
+    syncFromFirebase((results)=>{
+      if (results[SK.weekday]) setWeekday(results[SK.weekday]);
+      if (results[SK.weekend]) setWeekend(results[SK.weekend]);
+      if (results[SK.logs]) setLogs(results[SK.logs]);
+      if (results[SK.comments]) setComments(results[SK.comments]);
+      setSyncStatus("synced");
+    });
+    // リアルタイム購読（他端末からの変更を即時反映）
+    const unsub = subscribeFirebase({
+      [SK.weekday]: (v)=>setWeekday(v),
+      [SK.weekend]: (v)=>setWeekend(v),
+      [SK.logs]: (v)=>setLogs(v),
+      [SK.comments]: (v)=>setComments(v),
+    });
+    return ()=>unsub();
+  },[]);
 
   return (
     <div style={{background:"#0D1B2A",minHeight:"100vh",maxWidth:430,margin:"0 auto",fontFamily:"-apple-system,BlinkMacSystemFont,'Helvetica Neue',sans-serif",color:"#F7F9FC",overflowX:"hidden"}}>
@@ -930,6 +1001,19 @@ export default function App() {
         textarea:focus,input:focus{border-color:#4ECDC4!important;}
         ::-webkit-scrollbar{display:none;}
       `}</style>
+      {/* 同期ステータス */}
+      {syncStatus==="syncing"&&(
+        <div style={{background:"#162B45",borderBottom:"1px solid #2A4F7C",padding:"8px 16px",display:"flex",alignItems:"center",gap:8}}>
+          <span style={{fontSize:14,animation:"pulse 1s ease-in-out infinite"}}>🔄</span>
+          <div style={{fontSize:12,color:"#8BB4D8"}}>Firebaseと同期中...</div>
+        </div>
+      )}
+      {syncStatus==="synced"&&(
+        <div style={{background:"#0D2B1E",borderBottom:"1px solid #2D6A4F",padding:"6px 16px",display:"flex",alignItems:"center",gap:8}}>
+          <span style={{fontSize:12}}>✅</span>
+          <div style={{fontSize:11,color:"#4ECDC4"}}>同期完了 — iPhoneとPC間でデータが共有されます</div>
+        </div>
+      )}
       {!notifAsked&&typeof Notification!=="undefined"&&Notification.permission==="default"&&(
         <div style={{background:"#162B45",borderBottom:"1px solid #2A4F7C",padding:"12px 16px",display:"flex",alignItems:"center",gap:10}}>
           <span style={{fontSize:20}}>⌚</span>
