@@ -151,7 +151,7 @@ function SmallRing({progress,running,done}) {
 
 // ── FullscreenTimer ─────────────────────────────────────────
 function FullscreenTimer({routine,routines,activeIndex,elapsed,running,done,
-  onPause,onResume,onComplete,onSkip,onBack,totalDone,totalRemainSec}) {
+  onPause,onResume,onComplete,onSkip,onBack,onSuspend,totalDone,totalRemainSec}) {
   const remaining=Math.max(0,routine.duration-elapsed);
   const progress=elapsed/routine.duration;
   const finished=elapsed>=routine.duration;
@@ -164,11 +164,20 @@ function FullscreenTimer({routine,routines,activeIndex,elapsed,running,done,
 
       {/* 戻るボタン + 進捗 */}
       <div style={{width:"100%",display:"flex",flexDirection:"column",alignItems:"center",gap:8}}>
-        <button onClick={onBack} style={{
-          alignSelf:"flex-start", background:"none", border:"1px solid #2A4F7C",
-          borderRadius:10, color:"#8BB4D8", fontSize:13, fontWeight:600,
-          padding:"6px 14px", cursor:"pointer", marginBottom:4,
-        }}>← 一覧に戻る</button>
+        <div style={{display:"flex",gap:8,alignSelf:"stretch",marginBottom:4}}>
+          <button onClick={onBack} style={{
+            background:"none", border:"1px solid #2A4F7C",
+            borderRadius:10, color:"#8BB4D8", fontSize:13, fontWeight:600,
+            padding:"6px 14px", cursor:"pointer", flex:1,
+          }}>← 一覧に戻る</button>
+          {!done&&(
+            <button onClick={onSuspend} style={{
+              background:"#2A1A00", border:"1px solid #FF9966",
+              borderRadius:10, color:"#FF9966", fontSize:13, fontWeight:600,
+              padding:"6px 14px", cursor:"pointer", flex:1,
+            }}>⏸ 中断して戻る</button>
+          )}
+        </div>
         <div style={{display:"flex",gap:6,width:"100%",justifyContent:"center"}}>
           {routines.map((r,i)=>(
             <div key={r.id} style={{height:4,borderRadius:2,flex:1,maxWidth:40,
@@ -267,6 +276,8 @@ function TodayPage({weekday,weekend,logs,setLogs,comments,setComments}) {
   const [running,setRunning]=useState(false);
   const [showFull,setShowFull]=useState(false);
   const [missedMsg,setMissedMsg]=useState(null);
+  // 中断中タイマー: { [routineId]: elapsedSec }
+  const [pausedTimers,setPausedTimers]=useState(()=>load("rt_paused_timers")||{});
   const timerRef=useRef(null);
   const startedAtRef=useRef(null);
   const baseElapsedRef=useRef(0);
@@ -319,11 +330,32 @@ function TodayPage({weekday,weekend,logs,setLogs,comments,setComments}) {
 
   function startTimer(index) {
     unlockAudio();
-    baseElapsedRef.current=0; startedAtRef.current=Date.now();
+    // 現在実行中のタイマーがあれば中断保存
+    if (activeIndex!==null && activeIndex!==index) {
+      const currentRoutine=routinesRef.current[activeIndex];
+      if (currentRoutine && !todayLog[currentRoutine.id]) {
+        const currentElapsed=calcElapsed(baseElapsedRef.current);
+        const updated={...pausedTimers,[currentRoutine.id]:currentElapsed};
+        setPausedTimers(updated);
+        save("rt_paused_timers",updated);
+      }
+    }
+    clearInterval(timerRef.current);
+    // 対象が中断中なら続きから再開
+    const targetRoutine=routinesRef.current[index];
+    const resumeBase=targetRoutine&&pausedTimers[targetRoutine.id]||0;
+    // 中断リストから削除
+    if (targetRoutine&&pausedTimers[targetRoutine.id]!==undefined) {
+      const updated={...pausedTimers};
+      delete updated[targetRoutine.id];
+      setPausedTimers(updated);
+      save("rt_paused_timers",updated);
+    }
+    baseElapsedRef.current=resumeBase; startedAtRef.current=Date.now();
     activeIndexRef.current=index;
-    setElapsed(0); setActiveIndex(index); setRunning(true); setShowFull(true); setMissedMsg(null);
-    save("rt_timer_state",{index,startedAt:startedAtRef.current,base:0,scheduleType,selectedDate});
-    tickStart(index,0);
+    setElapsed(resumeBase); setActiveIndex(index); setRunning(true); setShowFull(true); setMissedMsg(null);
+    save("rt_timer_state",{index,startedAt:startedAtRef.current,base:resumeBase,scheduleType,selectedDate});
+    tickStart(index,resumeBase);
   }
 
   function handlePause() {
@@ -342,9 +374,16 @@ function TodayPage({weekday,weekend,logs,setLogs,comments,setComments}) {
     const e=calcElapsed(baseElapsedRef.current);
     const updated={...logs,[selectedDate]:{...todayLog,[activeRoutine.id]:{completedAt:new Date().toISOString(),elapsed:e}}};
     setLogs(updated); save(SK.logs,updated);
+    // 中断リストからも削除
+    if (pausedTimers[activeRoutine.id]!==undefined) {
+      const p={...pausedTimers}; delete p[activeRoutine.id];
+      setPausedTimers(p); save("rt_paused_timers",p);
+    }
     clearInterval(timerRef.current); setRunning(false);
     startedAtRef.current=null; save("rt_timer_state",null); setMissedMsg(null);
-    const nextIdx=findNextUndone(activeIndex+1);
+    // 次は中断中タイマーがあればそちらを優先
+    const pausedIdx=routines.findIndex(r=>pausedTimers[r.id]!==undefined&&!todayLog[r.id]&&r.id!==activeRoutine.id);
+    const nextIdx=pausedIdx!==-1?pausedIdx:findNextUndone(activeIndex+1);
     if (nextIdx!==null) setTimeout(()=>startTimer(nextIdx),400);
     else { setActiveIndex(null); activeIndexRef.current=null; setShowFull(false); }
   }
@@ -354,6 +393,16 @@ function TodayPage({weekday,weekend,logs,setLogs,comments,setComments}) {
     const nextIdx=findNextUndone(activeIndex+1);
     if (nextIdx!==null) setTimeout(()=>startTimer(nextIdx),200);
     else { setActiveIndex(null); activeIndexRef.current=null; setShowFull(false); }
+  }
+  // 中断ボタン（全画面から一覧に戻る際に中断保存）
+  function handleSuspend() {
+    if (!activeRoutine) return;
+    const currentElapsed=calcElapsed(baseElapsedRef.current);
+    const updated={...pausedTimers,[activeRoutine.id]:currentElapsed};
+    setPausedTimers(updated); save("rt_paused_timers",updated);
+    clearInterval(timerRef.current); setRunning(false);
+    startedAtRef.current=null; save("rt_timer_state",null);
+    setActiveIndex(null); activeIndexRef.current=null; setShowFull(false);
   }
   function handleBack() { setShowFull(false); }
 
@@ -371,6 +420,11 @@ function TodayPage({weekday,weekend,logs,setLogs,comments,setComments}) {
     const newLog={...todayLog}; delete newLog[id];
     const updated={...logs,[selectedDate]:newLog};
     setLogs(updated); save(SK.logs,updated);
+    // 中断リストもクリア
+    if (pausedTimers[id]!==undefined) {
+      const p={...pausedTimers}; delete p[id];
+      setPausedTimers(p); save("rt_paused_timers",p);
+    }
   }
 
   // タイマー状態復元（起動時 + バックグラウンド復帰時 共通処理）
@@ -443,7 +497,7 @@ function TodayPage({weekday,weekend,logs,setLogs,comments,setComments}) {
         <FullscreenTimer routine={activeRoutine} routines={routines} activeIndex={activeIndex}
           elapsed={elapsed} running={running} done={!!todayLog[activeRoutine.id]}
           onPause={handlePause} onResume={handleResume} onComplete={handleComplete}
-          onSkip={handleSkip} onBack={handleBack} totalDone={doneCount} totalRemainSec={totalRemainSec}/>
+          onSkip={handleSkip} onBack={handleBack} onSuspend={handleSuspend} totalDone={doneCount} totalRemainSec={totalRemainSec}/>
       )}
       <div style={{padding:"20px 16px 100px"}}>
         {/* ヘッダー */}
@@ -575,11 +629,20 @@ function TodayPage({weekday,weekend,logs,setLogs,comments,setComments}) {
                   {/* 単体スタートボタン（実行中以外は常に表示） */}
                   {!isActive&&(
                     <button onClick={e=>{e.stopPropagation();handleSingleStart(idx);}} style={{
-                      background:done?"#162B45":"#0D2233",
-                      border:`1px solid ${done?"#2D6A4F":"#2A4F7C"}`,
-                      borderRadius:8,color:done?"#4ECDC4":"#4A6FA5",
+                      background:pausedTimers[r.id]!==undefined?"#2A1A00":done?"#162B45":"#0D2233",
+                      border:`1px solid ${pausedTimers[r.id]!==undefined?"#FF9966":done?"#2D6A4F":"#2A4F7C"}`,
+                      borderRadius:8,
+                      color:pausedTimers[r.id]!==undefined?"#FF9966":done?"#4ECDC4":"#4A6FA5",
                       fontSize:11,padding:"4px 8px",cursor:"pointer",fontWeight:600,
-                    }}>▶ {done?"再実行":"開始"}</button>
+                    }}>
+                      {pausedTimers[r.id]!==undefined
+                        ?`▶ 再開 (残${fmt(r.duration-pausedTimers[r.id])})`
+                        :done?"▶ 再実行":"▶ 開始"}
+                    </button>
+                  )}
+                  {/* 中断中バッジ */}
+                  {!isActive&&pausedTimers[r.id]!==undefined&&(
+                    <div style={{fontSize:10,color:"#FF9966",background:"#2A1A00",border:"1px solid #FF996640",padding:"2px 7px",borderRadius:8,fontWeight:700}}>中断中</div>
                   )}
                   {/* 完了/未完了切替 */}
                   {!isActive&&(done
