@@ -72,39 +72,87 @@ function unlockAudio() {
   } catch {}
 }
 
-// resume()完了を待ってから音を鳴らす（iOSのsuspended対策）
+// マーラー交響曲第1番「巨人」第1楽章冒頭モチーフ（Web Audio API合成）
+// カッコウ音型(A4→E4) + ホルン主題(D4-F#4-A4-D5...)
 function playFinishSound() {
   try {
     const ctx = getAudioCtx(); if (!ctx) return;
     const doPlay = () => {
       try {
-        [523.25, 659.25, 783.99, 1046.5].forEach((freq, i) => {
-          const osc = ctx.createOscillator(), gain = ctx.createGain();
-          osc.connect(gain); gain.connect(ctx.destination);
-          osc.type = "sine"; osc.frequency.value = freq;
-          const t = ctx.currentTime + i * 0.22;
+        const BPM = 60; // テンポ（遅め・荘厳に）
+        const beat = 60 / BPM;
+
+        // 音符定義: [周波数, 拍数, 音量, 波形]
+        // sawtooth=弦・ホルン感、sine=フルート感、triangle=木管感
+        const motif = [
+          // ── カッコウ音型（オーボエ風: triangle）──
+          [440.00, 0.45, 0.22, "triangle"],   // A4
+          [329.63, 0.45, 0.18, "triangle"],   // E4
+          [440.00, 0.45, 0.22, "triangle"],   // A4
+          [329.63, 0.45, 0.18, "triangle"],   // E4
+          // ── 主題（ホルン風: sawtooth）──
+          [293.66, 0.75, 0.32, "sawtooth"],   // D4
+          [369.99, 0.25, 0.28, "sawtooth"],   // F#4
+          [440.00, 0.5,  0.32, "sawtooth"],   // A4
+          [587.33, 1.0,  0.38, "sawtooth"],   // D5 ←頂点
+          [440.00, 0.5,  0.30, "sawtooth"],   // A4
+          [369.99, 0.5,  0.28, "sawtooth"],   // F#4
+          [293.66, 0.75, 0.32, "sawtooth"],   // D4
+          [329.63, 0.25, 0.25, "sawtooth"],   // E4
+          [369.99, 0.5,  0.30, "sawtooth"],   // F#4
+          [392.00, 0.25, 0.28, "sawtooth"],   // G4
+          [440.00, 0.25, 0.30, "sawtooth"],   // A4
+          [587.33, 2.0,  0.42, "sawtooth"],   // D5（長め・余韻）
+        ];
+
+        // マスターゲイン（全体音量）
+        const master = ctx.createGain();
+        master.gain.value = 0.55;
+        // リバーブ効果（コンサートホール感）
+        const convolver = ctx.createConvolver ? null : null; // 省略しシンプルに
+        // ローパスフィルター（生っぽく）
+        const lpf = ctx.createBiquadFilter();
+        lpf.type = "lowpass"; lpf.frequency.value = 2800;
+        master.connect(lpf); lpf.connect(ctx.destination);
+
+        let t = ctx.currentTime + 0.05;
+        motif.forEach(([freq, beats, vol, type]) => {
+          const dur = beats * beat;
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          // ホルン感を出すため倍音を重ねる
+          const osc2 = ctx.createOscillator();
+          const gain2 = ctx.createGain();
+
+          osc.type = type; osc.frequency.value = freq;
+          osc2.type = "sine"; osc2.frequency.value = freq * 2; // 1オクターブ上の倍音
+
+          osc.connect(gain); gain.connect(master);
+          osc2.connect(gain2); gain2.connect(master);
+
+          // エンベロープ（アタック・サステイン・リリース）
           gain.gain.setValueAtTime(0, t);
-          gain.gain.linearRampToValueAtTime(0.45, t + 0.03);
-          gain.gain.exponentialRampToValueAtTime(0.001, t + 0.55);
-          osc.start(t); osc.stop(t + 0.6);
+          gain.gain.linearRampToValueAtTime(vol, t + 0.06);
+          gain.gain.setValueAtTime(vol * 0.85, t + dur * 0.6);
+          gain.gain.exponentialRampToValueAtTime(0.001, t + dur * 0.95);
+
+          gain2.gain.setValueAtTime(0, t);
+          gain2.gain.linearRampToValueAtTime(vol * 0.15, t + 0.06);
+          gain2.gain.exponentialRampToValueAtTime(0.001, t + dur * 0.9);
+
+          osc.start(t); osc.stop(t + dur);
+          osc2.start(t); osc2.stop(t + dur);
+          t += dur;
         });
-        // 余韻
-        const osc2 = ctx.createOscillator(), g2 = ctx.createGain();
-        osc2.connect(g2); g2.connect(ctx.destination);
-        osc2.type = "sine"; osc2.frequency.value = 1046.5;
-        const t2 = ctx.currentTime + 4 * 0.22 + 0.15;
-        g2.gain.setValueAtTime(0, t2);
-        g2.gain.linearRampToValueAtTime(0.35, t2 + 0.05);
-        g2.gain.exponentialRampToValueAtTime(0.001, t2 + 1.5);
-        osc2.start(t2); osc2.stop(t2 + 1.6);
-      } catch {}
+      } catch(e) { console.warn("playFinishSound error", e); }
     };
+
     if (ctx.state === "suspended") {
       ctx.resume().then(doPlay).catch(doPlay);
     } else {
       doPlay();
     }
-  } catch {}
+  } catch(e) { console.warn("audio context error", e); }
 }
 
 // ── 通知 ────────────────────────────────────────────────────
