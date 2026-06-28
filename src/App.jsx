@@ -38,7 +38,18 @@ function fmtMin(sec) {
   const s = Math.max(0,sec), h = Math.floor(s/3600), m = Math.floor((s%3600)/60);
   if (h>0&&m>0) return `${h}時間${m}分`; if (h>0) return `${h}時間`; return `${m}分`;
 }
-function todayStr() { return new Date().toISOString().slice(0,10); }
+function todayStr() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+}
+function dateStrOf(d) {
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+}
+function addDays(dateStr, n) {
+  const d = new Date(dateStr + "T00:00:00");
+  d.setDate(d.getDate() + n);
+  return dateStrOf(d);
+}
 function dateLabel(d) { return new Date(d).toLocaleDateString("ja-JP",{month:"short",day:"numeric",weekday:"short"}); }
 
 // ── Web Audio ───────────────────────────────────────────────
@@ -232,14 +243,24 @@ function TabBar({tab,setTab}) {
 
 // ── TodayPage ───────────────────────────────────────────────
 function TodayPage({weekday,weekend,logs,setLogs,comments,setComments}) {
-  const today=todayStr();
-  const todayDate=new Date();
+  const realToday=todayStr();
+  // 対象日付（前日・今日・翌日から選択）。最後に使った日付を記憶
+  const [selectedDate,setSelectedDate]=useState(()=>load("rt_selected_date")||realToday);
+  const todayDate=new Date(selectedDate+"T00:00:00");
   const autoType=getScheduleType(todayDate);
-  const [scheduleType,setScheduleType]=useState(()=>load(`rt_schedule_override_${today}`)||autoType);
+  const [scheduleType,setScheduleType]=useState(()=>load(`rt_schedule_override_${selectedDate}`)||autoType);
   const routines=scheduleType==="weekend"?weekend:weekday;
-  const todayLog=logs[today]||{};
+  const todayLog=logs[selectedDate]||{};
 
-  function handleTypeChange(type) { setScheduleType(type); save(`rt_schedule_override_${today}`,type); }
+  function handleTypeChange(type) { setScheduleType(type); save(`rt_schedule_override_${selectedDate}`,type); }
+
+  function handleDateChange(dateStr) {
+    setSelectedDate(dateStr);
+    save("rt_selected_date", dateStr);
+    const d=new Date(dateStr+"T00:00:00");
+    const type=load(`rt_schedule_override_${dateStr}`)||getScheduleType(d);
+    setScheduleType(type);
+  }
 
   const [activeIndex,setActiveIndex]=useState(null);
   const [elapsed,setElapsed]=useState(0);
@@ -301,7 +322,7 @@ function TodayPage({weekday,weekend,logs,setLogs,comments,setComments}) {
     baseElapsedRef.current=0; startedAtRef.current=Date.now();
     activeIndexRef.current=index;
     setElapsed(0); setActiveIndex(index); setRunning(true); setShowFull(true); setMissedMsg(null);
-    save("rt_timer_state",{index,startedAt:startedAtRef.current,base:0,scheduleType});
+    save("rt_timer_state",{index,startedAt:startedAtRef.current,base:0,scheduleType,selectedDate});
     tickStart(index,0);
   }
 
@@ -313,13 +334,13 @@ function TodayPage({weekday,weekend,logs,setLogs,comments,setComments}) {
   function handleResume() {
     if (!activeRoutine||running) return;
     unlockAudio(); startedAtRef.current=Date.now(); setRunning(true);
-    save("rt_timer_state",{index:activeIndex,startedAt:startedAtRef.current,base:baseElapsedRef.current,scheduleType});
+    save("rt_timer_state",{index:activeIndex,startedAt:startedAtRef.current,base:baseElapsedRef.current,scheduleType,selectedDate});
     tickStart(activeIndex,baseElapsedRef.current);
   }
   function handleComplete() {
     if (!activeRoutine) return;
     const e=calcElapsed(baseElapsedRef.current);
-    const updated={...logs,[today]:{...todayLog,[activeRoutine.id]:{completedAt:new Date().toISOString(),elapsed:e}}};
+    const updated={...logs,[selectedDate]:{...todayLog,[activeRoutine.id]:{completedAt:new Date().toISOString(),elapsed:e}}};
     setLogs(updated); save(SK.logs,updated);
     clearInterval(timerRef.current); setRunning(false);
     startedAtRef.current=null; save("rt_timer_state",null); setMissedMsg(null);
@@ -342,13 +363,13 @@ function TodayPage({weekday,weekend,logs,setLogs,comments,setComments}) {
   }
   // 手動完了
   function handleSingleDone(id) {
-    const updated={...logs,[today]:{...todayLog,[id]:{completedAt:new Date().toISOString(),elapsed:0}}};
+    const updated={...logs,[selectedDate]:{...todayLog,[id]:{completedAt:new Date().toISOString(),elapsed:0}}};
     setLogs(updated); save(SK.logs,updated);
   }
   // 完了を取り消す
   function handleUndone(id) {
     const newLog={...todayLog}; delete newLog[id];
-    const updated={...logs,[today]:newLog};
+    const updated={...logs,[selectedDate]:newLog};
     setLogs(updated); save(SK.logs,updated);
   }
 
@@ -356,7 +377,9 @@ function TodayPage({weekday,weekend,logs,setLogs,comments,setComments}) {
   function restoreTimerState() {
     const state = load("rt_timer_state");
     if (!state) return;
-    const { index, startedAt, base, scheduleType: savedType } = state;
+    const { index, startedAt, base, scheduleType: savedType, selectedDate: savedDate } = state;
+    // 保存された対象日付を復元
+    if (savedDate) { setSelectedDate(savedDate); save("rt_selected_date", savedDate); }
     const now = Date.now();
     const realElapsed = base + Math.floor((now - startedAt) / 1000);
     const routine = routinesRef.current[index];
@@ -411,8 +434,8 @@ function TodayPage({weekday,weekend,logs,setLogs,comments,setComments}) {
   const doneCount=Object.keys(todayLog).length;
   const total=routines.length;
   const allDone=doneCount===total&&total>0;
-  const todayComment=comments[today]||"";
-  function handleComment(val) { const u={...comments,[today]:val}; setComments(u); save(SK.comments,u); }
+  const todayComment=comments[selectedDate]||"";
+  function handleComment(val) { const u={...comments,[selectedDate]:val}; setComments(u); save(SK.comments,u); }
 
   return (
     <>
@@ -425,11 +448,40 @@ function TodayPage({weekday,weekend,logs,setLogs,comments,setComments}) {
       <div style={{padding:"20px 16px 100px"}}>
         {/* ヘッダー */}
         <div style={{marginBottom:16}}>
-          <div style={{fontSize:12,color:"#4A6FA5",marginBottom:4}}>
-            {todayDate.toLocaleDateString("ja-JP",{year:"numeric",month:"long",day:"numeric",weekday:"long"})}
+          <div style={{fontSize:22,fontWeight:800,color:"#F7F9FC",marginBottom:12}}>
+            {allDone?"🎉 ルーティン完了！":"今日のルーティン"}
           </div>
-          <div style={{fontSize:22,fontWeight:800,color:"#F7F9FC"}}>
-            {allDone?"🎉 今日のルーティン完了！":"今日のルーティン"}
+
+          {/* 対象日付セレクター */}
+          <div style={{background:"#1E3A5F",borderRadius:14,padding:"10px 14px",border:"1px solid #2A4F7C"}}>
+            <div style={{fontSize:11,color:"#4A6FA5",marginBottom:8,fontWeight:600}}>📅 対象日付</div>
+            <div style={{display:"flex",gap:6}}>
+              {[-1,0,1].map(offset=>{
+                const dateStr=addDays(realToday,offset);
+                const d=new Date(dateStr+"T00:00:00");
+                const isSelected=selectedDate===dateStr;
+                const isToday=dateStr===realToday;
+                const label=offset===-1?"前日":offset===0?"今日":"翌日";
+                const dayLabel=d.toLocaleDateString("ja-JP",{month:"short",day:"numeric",weekday:"short"});
+                return (
+                  <button key={offset} onClick={()=>handleDateChange(dateStr)} style={{
+                    flex:1, padding:"8px 4px", borderRadius:10, border:"none", cursor:"pointer",
+                    background:isSelected?"#4ECDC4":"#0D1B2A",
+                    color:isSelected?"#0D1B2A":"#4A6FA5",
+                    boxShadow:isSelected?"0 0 0 2px #4ECDC480":"none",
+                    transition:"all 0.2s",
+                  }}>
+                    <div style={{fontSize:12,fontWeight:800}}>{label}{isToday?"  ✦":""}</div>
+                    <div style={{fontSize:10,marginTop:2,opacity:0.8}}>{dayLabel}</div>
+                  </button>
+                );
+              })}
+            </div>
+            {selectedDate!==realToday&&(
+              <div style={{fontSize:11,color:"#FF9966",marginTop:8,textAlign:"center"}}>
+                ⚠️ {selectedDate===addDays(realToday,-1)?"前日":"翌日"}のルーティンを記録中
+              </div>
+            )}
           </div>
         </div>
 
