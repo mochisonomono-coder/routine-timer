@@ -3,51 +3,77 @@ import { useState, useEffect, useRef } from "react";
 
 // ── ストレージ（localStorage + Firebase同期） ───────────────
 import { db } from "./firebase";
-import { ref, set, onValue, off } from "firebase/database";
+import { ref, set, get, onValue, off } from "firebase/database";
 
 const SK = { weekday: "rt_routines_weekday", weekend: "rt_routines_weekend", logs: "rt_logs", comments: "rt_comments" };
 const FB_KEYS = ["rt_routines_weekday","rt_routines_weekend","rt_logs","rt_comments"];
-const USER_ID = "keita"; // 固定ユーザーID（個人利用）
+const USER_ID = "keita";
 
-// localStorage（高速・オフライン対応）
-function load(key) { try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : null; } catch { return null; } }
-function save(key, val) {
+// localStorageへの読み書き（高速・オフライン対応）
+function load(key) {
+  try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : null; } catch { return null; }
+}
+function saveLocal(key, val) {
   try { localStorage.setItem(key, JSON.stringify(val)); } catch {}
-  // Firebaseにも同期（主要データのみ）
+}
+
+// Firebase + localStorageに保存
+function save(key, val) {
+  saveLocal(key, val);
   if (FB_KEYS.includes(key)) {
     try {
-      const fbRef = ref(db, `users/${USER_ID}/${key}`);
-      set(fbRef, val).catch(()=>{});
+      set(ref(db, `users/${USER_ID}/${key}`), val).catch(()=>{});
     } catch {}
   }
 }
 
-// Firebase → localStorageへの初回同期
-export function syncFromFirebase(onDone) {
+// 起動時：Firebase優先でデータ取得。Firebaseになければlocalを使いFirebaseに書き込む
+export function initSync(defaults, onDone) {
   const results = {};
   let count = 0;
   FB_KEYS.forEach(key => {
-    const fbRef = ref(db, `users/${USER_ID}/${key}`);
-    onValue(fbRef, (snapshot) => {
-      const val = snapshot.val();
-      if (val !== null) {
-        localStorage.setItem(key, JSON.stringify(val));
-        results[key] = val;
+    get(ref(db, `users/${USER_ID}/${key}`)).then(snapshot => {
+      const fbVal = snapshot.val();
+      const localVal = load(key);
+      if (fbVal !== null) {
+        // Firebaseにデータあり → 採用してlocalStorageも更新
+        saveLocal(key, fbVal);
+        results[key] = fbVal;
+      } else if (localVal !== null) {
+        // localStorageにデータあり → Firebaseにアップロード
+        set(ref(db, `users/${USER_ID}/${key}`), localVal).catch(()=>{});
+        results[key] = localVal;
+      } else {
+        // どちらにもなし → デフォルト値を両方に保存
+        const def = defaults[key];
+        if (def) {
+          saveLocal(key, def);
+          set(ref(db, `users/${USER_ID}/${key}`), def).catch(()=>{});
+          results[key] = def;
+        }
       }
       count++;
       if (count === FB_KEYS.length) onDone(results);
-    }, { onlyOnce: true });
+    }).catch(() => {
+      // Firebase接続失敗 → localStorageを使用
+      const localVal = load(key);
+      results[key] = localVal ?? defaults[key];
+      count++;
+      if (count === FB_KEYS.length) onDone(results);
+    });
   });
 }
 
-// Firebaseのリアルタイム更新を購読（他端末からの変更を反映）
+// リアルタイム購読（他端末からの変更を反映。初回onValueは無視して2回目以降のみ適用）
 export function subscribeFirebase(callbacks) {
   const unsubs = FB_KEYS.map(key => {
     const fbRef = ref(db, `users/${USER_ID}/${key}`);
+    let isFirst = true; // 初回は initSync で処理済みなのでスキップ
     const handler = onValue(fbRef, (snapshot) => {
+      if (isFirst) { isFirst = false; return; }
       const val = snapshot.val();
       if (val !== null && callbacks[key]) {
-        localStorage.setItem(key, JSON.stringify(val));
+        saveLocal(key, val);
         callbacks[key](val);
       }
     });
@@ -116,6 +142,8 @@ function getAudioCtx() {
 function unlockAudio() {
   try {
     const ctx = getAudioCtx(); if (!ctx) return;
+    // resumeして確実にrunning状態にする
+    if (ctx.state === "suspended") ctx.resume().catch(()=>{});
     const osc = ctx.createOscillator(), g = ctx.createGain();
     g.gain.value = 0; osc.connect(g); g.connect(ctx.destination);
     osc.start(); osc.stop(ctx.currentTime + 0.001);
@@ -123,86 +151,73 @@ function unlockAudio() {
 }
 
 // マーラー交響曲第1番「巨人」第1楽章冒頭モチーフ（Web Audio API合成）
-// カッコウ音型(A4→E4) + ホルン主題(D4-F#4-A4-D5...)
 function playFinishSound() {
   try {
     const ctx = getAudioCtx(); if (!ctx) return;
+
     const doPlay = () => {
       try {
-        const BPM = 60; // テンポ（遅め・荘厳に）
+        const BPM = 60;
         const beat = 60 / BPM;
-
-        // 音符定義: [周波数, 拍数, 音量, 波形]
-        // sawtooth=弦・ホルン感、sine=フルート感、triangle=木管感
         const motif = [
-          // ── カッコウ音型（オーボエ風: triangle）──
-          [440.00, 0.45, 0.22, "triangle"],   // A4
-          [329.63, 0.45, 0.18, "triangle"],   // E4
-          [440.00, 0.45, 0.22, "triangle"],   // A4
-          [329.63, 0.45, 0.18, "triangle"],   // E4
-          // ── 主題（ホルン風: sawtooth）──
-          [293.66, 0.75, 0.32, "sawtooth"],   // D4
-          [369.99, 0.25, 0.28, "sawtooth"],   // F#4
-          [440.00, 0.5,  0.32, "sawtooth"],   // A4
-          [587.33, 1.0,  0.38, "sawtooth"],   // D5 ←頂点
-          [440.00, 0.5,  0.30, "sawtooth"],   // A4
-          [369.99, 0.5,  0.28, "sawtooth"],   // F#4
-          [293.66, 0.75, 0.32, "sawtooth"],   // D4
-          [329.63, 0.25, 0.25, "sawtooth"],   // E4
-          [369.99, 0.5,  0.30, "sawtooth"],   // F#4
-          [392.00, 0.25, 0.28, "sawtooth"],   // G4
-          [440.00, 0.25, 0.30, "sawtooth"],   // A4
-          [587.33, 2.0,  0.42, "sawtooth"],   // D5（長め・余韻）
+          [440.00, 0.45, 0.22, "triangle"],
+          [329.63, 0.45, 0.18, "triangle"],
+          [440.00, 0.45, 0.22, "triangle"],
+          [329.63, 0.45, 0.18, "triangle"],
+          [293.66, 0.75, 0.32, "sawtooth"],
+          [369.99, 0.25, 0.28, "sawtooth"],
+          [440.00, 0.5,  0.32, "sawtooth"],
+          [587.33, 1.0,  0.38, "sawtooth"],
+          [440.00, 0.5,  0.30, "sawtooth"],
+          [369.99, 0.5,  0.28, "sawtooth"],
+          [293.66, 0.75, 0.32, "sawtooth"],
+          [329.63, 0.25, 0.25, "sawtooth"],
+          [369.99, 0.5,  0.30, "sawtooth"],
+          [392.00, 0.25, 0.28, "sawtooth"],
+          [440.00, 0.25, 0.30, "sawtooth"],
+          [587.33, 2.0,  0.42, "sawtooth"],
         ];
 
-        // マスターゲイン（全体音量）
         const master = ctx.createGain();
         master.gain.value = 0.55;
-        // リバーブ効果（コンサートホール感）
-        const convolver = ctx.createConvolver ? null : null; // 省略しシンプルに
-        // ローパスフィルター（生っぽく）
         const lpf = ctx.createBiquadFilter();
         lpf.type = "lowpass"; lpf.frequency.value = 2800;
         master.connect(lpf); lpf.connect(ctx.destination);
 
-        let t = ctx.currentTime + 0.05;
+        // resume完了後のcurrentTimeを使う（重要：suspendedから復帰直後はcurrentTimeが古い）
+        let t = ctx.currentTime + 0.1;
         motif.forEach(([freq, beats, vol, type]) => {
           const dur = beats * beat;
-          const osc = ctx.createOscillator();
-          const gain = ctx.createGain();
-          // ホルン感を出すため倍音を重ねる
-          const osc2 = ctx.createOscillator();
-          const gain2 = ctx.createGain();
-
+          const osc = ctx.createOscillator(), gain = ctx.createGain();
+          const osc2 = ctx.createOscillator(), gain2 = ctx.createGain();
           osc.type = type; osc.frequency.value = freq;
-          osc2.type = "sine"; osc2.frequency.value = freq * 2; // 1オクターブ上の倍音
-
+          osc2.type = "sine"; osc2.frequency.value = freq * 2;
           osc.connect(gain); gain.connect(master);
           osc2.connect(gain2); gain2.connect(master);
-
-          // エンベロープ（アタック・サステイン・リリース）
           gain.gain.setValueAtTime(0, t);
           gain.gain.linearRampToValueAtTime(vol, t + 0.06);
           gain.gain.setValueAtTime(vol * 0.85, t + dur * 0.6);
           gain.gain.exponentialRampToValueAtTime(0.001, t + dur * 0.95);
-
           gain2.gain.setValueAtTime(0, t);
           gain2.gain.linearRampToValueAtTime(vol * 0.15, t + 0.06);
           gain2.gain.exponentialRampToValueAtTime(0.001, t + dur * 0.9);
-
           osc.start(t); osc.stop(t + dur);
           osc2.start(t); osc2.stop(t + dur);
           t += dur;
         });
-      } catch(e) { console.warn("playFinishSound error", e); }
+      } catch(e) { console.warn("playFinishSound doPlay error", e); }
     };
 
-    if (ctx.state === "suspended") {
-      ctx.resume().then(doPlay).catch(doPlay);
+    // suspended状態なら必ずresumeを待ってからcurrentTimeを取得して再生
+    if (ctx.state !== "running") {
+      ctx.resume().then(() => {
+        // resume後に少し待ってcurrentTimeが更新されてから再生
+        setTimeout(doPlay, 50);
+      }).catch(() => { setTimeout(doPlay, 50); });
     } else {
       doPlay();
     }
-  } catch(e) { console.warn("audio context error", e); }
+  } catch(e) { console.warn("playFinishSound error", e); }
 }
 
 // ── 通知 ────────────────────────────────────────────────────
@@ -412,13 +427,7 @@ function TodayPage({weekday,weekend,logs,setLogs,comments,setComments}) {
       const routine=routinesRef.current[index];
       if (e>=routine.duration) {
         clearInterval(timerRef.current); setRunning(false);
-        // AudioContext が suspended になっていても resume してから鳴らす
-        const ctx = getAudioCtx();
-        if (ctx && ctx.state === "suspended") {
-          ctx.resume().then(() => { playFinishSound(); }).catch(() => { playFinishSound(); });
-        } else {
-          playFinishSound();
-        }
+        playFinishSound(); // resume処理はplayFinishSound内部で統一
         sendNotif(`✅ ${routine.icon} ${routine.name} 完了！`,
           routinesRef.current[index+1]?`次: ${routinesRef.current[index+1].name}`:"すべて完了しました");
         if (navigator.vibrate) navigator.vibrate([200,100,200]);
@@ -975,22 +984,27 @@ export default function App() {
 
   // Firebase初回同期 + リアルタイム購読
   useEffect(()=>{
-    // 初回：Firebaseからデータを取得してlocalStorageと画面を更新
-    syncFromFirebase((results)=>{
+    const defaults = {
+      [SK.weekday]: DEFAULT_WEEKDAY,
+      [SK.weekend]: DEFAULT_WEEKEND,
+      [SK.logs]: {},
+      [SK.comments]: {},
+    };
+    // 初回：Firebase優先でデータ取得（なければlocalStorage→デフォルトの順）
+    initSync(defaults, (results)=>{
       if (results[SK.weekday]) setWeekday(results[SK.weekday]);
       if (results[SK.weekend]) setWeekend(results[SK.weekend]);
       if (results[SK.logs]) setLogs(results[SK.logs]);
       if (results[SK.comments]) setComments(results[SK.comments]);
       setSyncStatus("synced");
+      // 初回同期完了後にリアルタイム購読開始（初回onValueをスキップ）
+      subscribeFirebase({
+        [SK.weekday]: (v)=>setWeekday(v),
+        [SK.weekend]: (v)=>setWeekend(v),
+        [SK.logs]: (v)=>setLogs(v),
+        [SK.comments]: (v)=>setComments(v),
+      });
     });
-    // リアルタイム購読（他端末からの変更を即時反映）
-    const unsub = subscribeFirebase({
-      [SK.weekday]: (v)=>setWeekday(v),
-      [SK.weekend]: (v)=>setWeekend(v),
-      [SK.logs]: (v)=>setLogs(v),
-      [SK.comments]: (v)=>setComments(v),
-    });
-    return ()=>unsub();
   },[]);
 
   return (
